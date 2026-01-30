@@ -1,0 +1,55 @@
+name: Deploy to Sprites.dev
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'index.html'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Website
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Sprites.dev
+        run: |
+          echo "Deploying index.html to sprites.dev..."
+
+          # Upload the index.html file
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${{ secrets.SPRITES_API_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @index.html \
+            "https://api.sprites.dev/v1/sprites/jodi-daniel-portfolio/fs/write?path=/home/user/www/index.html")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "Response: $BODY"
+          echo "HTTP Status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Deployment successful!"
+            echo "Site URL: https://jodi-daniel-portfolio-blpx4.sprites.app"
+          else
+            echo "Deployment failed with status $HTTP_CODE"
+            exit 1
+          fi
+
+      - name: Verify deployment
+        run: |
+          echo "Verifying site is accessible..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://jodi-daniel-portfolio-blpx4.sprites.app")
+          if [ "$STATUS" -eq 200 ]; then
+            echo "Site is live and accessible!"
+          else
+            echo "Warning: Site returned status $STATUS"
+          fi
