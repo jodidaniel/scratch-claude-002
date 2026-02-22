@@ -111,6 +111,56 @@ Jodi Daniel is a partner at Wilson Sonsini Goodrich & Rosati (WSGR) with over 30
 - **Education:** J.D. (Georgetown), M.P.H. (Johns Hopkins), B.A. in Economics (Tufts)
 - **Prior roles:** Partner at Crowell & Moring, Senior Counsel for Health IT at HHS
 
+## SSL / Custom Domain (*.jodidaniel.com)
+
+The `.github/workflows/ssl.yml` workflow issues and renews a **Let's Encrypt wildcard certificate** for `*.jodidaniel.com` and deploys it to the sprite.
+
+### How It Works
+
+1. **certbot** runs on the GitHub Actions runner and issues a wildcard cert for `jodidaniel.com` and `*.jodidaniel.com` via the **DNS-01 challenge** (the only ACME challenge type that supports wildcard certificates).
+2. Cloudflare's API is used to automatically create/remove the required `_acme-challenge.jodidaniel.com` TXT record.
+3. The certificate and private key are uploaded to the sprite at `/home/user/ssl/`.
+4. An **nginx** configuration is uploaded and applied, running two virtual hosts:
+   - Port `8080` — HTTP, served through the sprites.dev reverse proxy.
+   - Port `8443` — HTTPS, using the wildcard certificate directly.
+5. nginx is registered as a persistent sprite service so it auto-starts on wake.
+
+### Required GitHub Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `SPRITES_API_TOKEN` | sprites.dev API token (already used by `deploy.yml`) |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with **Zone → DNS → Edit** permission for the `jodidaniel.com` zone |
+| `LETSENCRYPT_EMAIL` | Email address for Let's Encrypt account registration and expiry notices |
+
+Add these at: **Settings → Secrets and variables → Actions → New repository secret**
+
+### Running the Workflow
+
+- **First-time setup or manual renewal:** Go to Actions → *Issue/Renew SSL Wildcard Certificate* → *Run workflow*.
+- **Automatic renewal:** The workflow runs on the 1st of every other month (every 60 days), keeping the 90-day Let's Encrypt cert fresh.
+
+### DNS Setup for Custom Domain
+
+After the workflow runs, point your desired subdomain to the sprite. Add a CNAME record in your DNS provider (e.g., Cloudflare):
+
+```
+portfolio.jodidaniel.com  CNAME  jodi-daniel-portfolio-blpx4.sprites.app
+```
+
+**If using Cloudflare proxy (orange cloud):** Cloudflare terminates TLS and presents the uploaded wildcard cert automatically for any `*.jodidaniel.com` request.
+
+**For direct TLS termination on the sprite (no Cloudflare proxy):** Ensure port `8443` is routable to the sprite and access via `https://portfolio.jodidaniel.com:8443`.
+
+### Certificate Files on the Sprite
+
+| Path | Contents |
+|------|----------|
+| `/home/user/ssl/fullchain.pem` | Certificate + intermediate chain |
+| `/home/user/ssl/privkey.pem` | Private key |
+| `/home/user/nginx.conf` | nginx configuration |
+| `/home/user/logs/nginx-error.log` | nginx error log |
+
 ## Resources
 
 - [Wilson Sonsini Profile](https://www.wsgr.com/en/people/jodi-daniel.html)

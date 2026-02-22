@@ -1,0 +1,226 @@
+name: Issue/Renew SSL Wildcard Certificate
+
+# Wildcard certs require DNS-01 challenge (HTTP-01 cannot issue *.domain.com certs).
+# This workflow uses the Cloudflare DNS plugin to automate DNS record creation.
+#
+# Required GitHub Secrets:
+#   SPRITES_API_TOKEN  - sprites.dev API token
+#   CLOUDFLARE_API_TOKEN - Cloudflare API token with Zone:DNS:Edit permission
+#                          for the jodidaniel.com zone
+#   LETSENCRYPT_EMAIL  - Email for Let's Encrypt account registration/notifications
+
+on:
+  # Run manually from the Actions tab
+  workflow_dispatch:
+
+  # Auto-renew every 60 days (Let's Encrypt certs expire after 90 days)
+  schedule:
+    - cron: '0 0 1 */2 *'
+
+jobs:
+  ssl-certificate:
+    runs-on: ubuntu-latest
+    name: Issue and Deploy Wildcard SSL Certificate
+
+    steps:
+      - name: Install certbot with Cloudflare DNS plugin
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y certbot python3-certbot-dns-cloudflare
+
+      - name: Create Cloudflare credentials file
+        run: |
+          cat > /tmp/cloudflare.ini << 'EOF'
+          dns_cloudflare_api_token = ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          EOF
+          chmod 600 /tmp/cloudflare.ini
+
+      - name: Issue wildcard SSL certificate via DNS-01 challenge
+        run: |
+          sudo certbot certonly \
+            --dns-cloudflare \
+            --dns-cloudflare-credentials /tmp/cloudflare.ini \
+            --dns-cloudflare-propagation-seconds 60 \
+            -d "jodidaniel.com" \
+            -d "*.jodidaniel.com" \
+            --non-interactive \
+            --agree-tos \
+            --email "${{ secrets.LETSENCRYPT_EMAIL }}"
+
+      - name: Copy certificate files to accessible location
+        run: |
+          sudo cp /etc/letsencrypt/live/jodidaniel.com/fullchain.pem /tmp/fullchain.pem
+          sudo cp /etc/letsencrypt/live/jodidaniel.com/privkey.pem /tmp/privkey.pem
+          sudo chmod 644 /tmp/fullchain.pem /tmp/privkey.pem
+
+      - name: Create nginx configuration
+        run: |
+          cat > /tmp/nginx.conf << 'EOF'
+          worker_processes 1;
+          pid /home/user/nginx.pid;
+          error_log /home/user/logs/nginx-error.log;
+
+          events {
+              worker_connections 1024;
+          }
+
+          http {
+              include /etc/nginx/mime.types;
+              default_type application/octet-stream;
+              access_log /home/user/logs/nginx-access.log;
+              sendfile on;
+
+              # HTTP — served via sprites.dev proxy (https://jodi-daniel-portfolio-blpx4.sprites.app)
+              server {
+                  listen 8080;
+                  server_name _;
+
+                  root /home/user/www;
+                  index index.html;
+
+                  location / {
+                      try_files $uri $uri/ =404;
+                  }
+              }
+
+              # HTTPS — served directly with wildcard cert for *.jodidaniel.com
+              server {
+                  listen 8443 ssl;
+                  server_name jodidaniel.com *.jodidaniel.com;
+
+                  ssl_certificate     /home/user/ssl/fullchain.pem;
+                  ssl_certificate_key /home/user/ssl/privkey.pem;
+                  ssl_protocols       TLSv1.2 TLSv1.3;
+                  ssl_ciphers         HIGH:!aNULL:!MD5;
+                  ssl_prefer_server_ciphers on;
+
+                  root /home/user/www;
+                  index index.html;
+
+                  location / {
+                      try_files $uri $uri/ =404;
+                  }
+              }
+          }
+          EOF
+
+      - name: Create nginx setup script
+        run: |
+          cat > /tmp/setup-nginx.sh << 'EOF'
+          #!/bin/bash
+          set -e
+
+          # Install nginx if not already present
+          if ! command -v nginx &>/dev/null; then
+              apt-get update -qq
+              apt-get install -y -q --no-install-recommends nginx
+          fi
+
+          mkdir -p /home/user/logs
+
+          # Validate configuration
+          nginx -c /home/user/nginx.conf -t
+
+          # Reload if already running, otherwise start fresh
+          PID_FILE=/home/user/nginx.pid
+          if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+              nginx -c /home/user/nginx.conf -s reload
+              echo "nginx reloaded with new certificate"
+          else
+              nginx -c /home/user/nginx.conf
+              echo "nginx started"
+          fi
+          EOF
+
+      - name: Upload certificate to sprite
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${{ secrets.SPRITES_API_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @/tmp/fullchain.pem \
+            "https://api.sprites.dev/v1/sprites/jodi-daniel-portfolio/fs/write?path=/home/user/ssl/fullchain.pem&mkdir=true")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          echo "Certificate upload HTTP status: $HTTP_CODE"
+          [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] || (echo "Upload failed" && exit 1)
+
+      - name: Upload private key to sprite
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${{ secrets.SPRITES_API_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @/tmp/privkey.pem \
+            "https://api.sprites.dev/v1/sprites/jodi-daniel-portfolio/fs/write?path=/home/user/ssl/privkey.pem")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          echo "Private key upload HTTP status: $HTTP_CODE"
+          [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] || (echo "Upload failed" && exit 1)
+
+      - name: Upload nginx configuration to sprite
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${{ secrets.SPRITES_API_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @/tmp/nginx.conf \
+            "https://api.sprites.dev/v1/sprites/jodi-daniel-portfolio/fs/write?path=/home/user/nginx.conf")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          echo "nginx config upload HTTP status: $HTTP_CODE"
+          [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] || (echo "Upload failed" && exit 1)
+
+      - name: Upload setup script to sprite
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${{ secrets.SPRITES_API_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @/tmp/setup-nginx.sh \
+            "https://api.sprites.dev/v1/sprites/jodi-daniel-portfolio/fs/write?path=/home/user/setup-nginx.sh&mode=755")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          echo "Setup script upload HTTP status: $HTTP_CODE"
+          [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] || (echo "Upload failed" && exit 1)
+
+      - name: Install nginx and apply certificate on sprite
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.SPRITES_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"cmd":"sudo","args":["bash","/home/user/setup-nginx.sh"]}' \
+            "https://api.sprites.dev/v1/sprites/jodi-daniel-portfolio/exec")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "Exec response: $BODY"
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] || (echo "nginx setup failed" && exit 1)
+
+      - name: Register nginx as a persistent service
+        run: |
+          # Register nginx as a service so it auto-starts when the sprite wakes from idle
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X PUT \
+            -H "Authorization: Bearer ${{ secrets.SPRITES_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "cmd": "nginx",
+              "args": ["-c", "/home/user/nginx.conf", "-g", "daemon off;"],
+              "http_port": 8080
+            }' \
+            "https://api.sprites.dev/v1/sprites/jodi-daniel-portfolio/services/web")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "Service registration response: $BODY"
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] || (echo "Service registration failed" && exit 1)
+
+      - name: Verify certificate is active
+        run: |
+          echo ""
+          echo "SSL certificate for *.jodidaniel.com deployed successfully."
+          echo ""
+          echo "Next steps for custom domain access:"
+          echo "  1. Add a CNAME DNS record in your DNS provider:"
+          echo "     portfolio.jodidaniel.com  CNAME  jodi-daniel-portfolio-blpx4.sprites.app"
+          echo "  2. If using Cloudflare as a proxy, the wildcard cert is applied automatically."
+          echo "  3. For direct TLS on port 8443, ensure your DNS/firewall routes port 8443"
+          echo "     traffic to the sprite."
+          echo ""
+          echo "Sprite URLs:"
+          echo "  HTTP (via sprites.dev proxy): https://jodi-daniel-portfolio-blpx4.sprites.app"
+          echo "  HTTPS (direct, custom domain): https://portfolio.jodidaniel.com:8443  (after DNS setup)"
