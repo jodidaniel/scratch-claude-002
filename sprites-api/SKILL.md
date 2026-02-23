@@ -24,11 +24,44 @@ Sprites.dev provides persistent cloud sandboxes (called "sprites") for running c
 ### Sprite Management
 ```bash
 sprite create <name>          # Create new sprite
-sprite list                   # List all sprites
+sprite list                   # List all sprites with status
+sprite list --prefix <prefix> # Filter by name prefix
 sprite use <name>             # Set active sprite for directory
 sprite use                    # Show current active sprite
 sprite destroy <name>         # Delete sprite (permanent)
 ```
+
+### Checking Status & Monitoring Cost
+
+Run `sprite list` (alias: `sprite ls`) to see the status of all sprites at a glance:
+
+```
+$ sprite ls
+Sprites in organization my-org:
+┌──────────────┬─────────┬──────────┐
+│ NAME         │ STATUS  │ CREATED  │
+├──────────────┼─────────┼──────────┤
+│ my-dev       │ running │  2h ago  │
+│ old-project  │ warm    │  3d ago  │
+│ archived-env │ cold    │ 14d ago  │
+└──────────────┴─────────┴──────────┘
+Total: 3 sprite(s)
+```
+
+**Status meanings and cost implications:**
+
+| Status    | Description                                              | Compute cost | Storage cost |
+|-----------|----------------------------------------------------------|:------------:|:------------:|
+| `running` | Actively executing (open session, exec, or HTTP traffic) | **Billed**   | Billed       |
+| `warm`    | Idle, NVMe cache intact — wakes instantly                | Free         | Billed       |
+| `cold`    | Fully hibernated — slower wake, NVMe cache rehydrates    | Free         | Billed       |
+
+**Key points:**
+- Only `running` sprites incur compute charges (CPU, RAM, hot storage — min 6.25% CPU and 250 MB RAM per second)
+- All sprites always incur storage charges until destroyed
+- Sprites auto-hibernate after 30 seconds of inactivity (`running` → `warm` or `cold`)
+- Each billing tier has a hard limit on max warm sprites; exceeding it evicts the oldest warm sprite to cold
+- Run `sprite list` regularly to spot any unexpectedly `running` sprites that may be accruing charges
 
 ### Command Execution
 ```bash
