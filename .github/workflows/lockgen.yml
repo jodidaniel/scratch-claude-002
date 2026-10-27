@@ -1,0 +1,42 @@
+# Temporary: generates actions.lock for each targets/<repo>/ and commits it back.
+# Branch-only helper for _agent-guidance#348 migrations; delete the branch after.
+name: lockgen
+on:
+  push:
+    branches: [claude/lockgen-i9imsq]
+    paths: [targets/**]
+permissions:
+  contents: write
+jobs:
+  gen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install gh-actions-lock v0.3.0 (checksum-verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/gal/gh-actions-lock"; mkdir -p "$d"
+          gh release download v0.3.0 -R github/gh-actions-lock -p linux-amd64 -O "$d/gh-actions-lock" --clobber
+          echo "15810767a8cd28d389f0942e3ce515ac0008c3f65301c3834fd4c046d4bda497  $d/gh-actions-lock" | sha256sum -c -
+          chmod +x "$d/gh-actions-lock"
+          (cd "$d" && gh extension install .)
+      - name: Lock each target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          for t in targets/*/; do
+            echo "::group::$t"
+            ( cd "$t" && rm -rf .git && git init -q && git add -A && git -c user.name=x -c user.email=x@example.com commit -qm x \
+              && gh actions-lock --no-narrow --no-interactive; echo "rc=$?" > LOCKGEN_RC; \
+              gh actions-lock --verify --no-interactive --json=valid,findings > LOCKGEN_VERIFY.json 2>&1; echo "verify_rc=$?" >> LOCKGEN_RC; rm -rf .git )
+            echo "::endgroup::"
+          done
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add targets
+          git commit -m "lockgen results" && git push origin HEAD:claude/lockgen-i9imsq
